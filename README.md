@@ -1,0 +1,2 @@
+# OptiFuse Server
+Repository to manage server side management of OptiFuse platform. A platform where we adapt fusion functions to provide you with faster fusion functions rather than ordinary aws lambda serverless functions.
