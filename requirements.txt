@@ -1,0 +1,13 @@
+asgiref==3.9.1
+certifi==2025.7.9
+charset-normalizer==3.4.2
+dj-database-url==3.0.1
+Django==5.2.4
+django-cors-headers==4.7.0
+djangorestframework==3.16.0
+idna==3.10
+psycopg2-binary==2.9.10
+python-decouple==3.8
+requests==2.32.4
+sqlparse==0.5.3
+urllib3==2.5.0
