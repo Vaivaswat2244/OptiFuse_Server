@@ -20,6 +20,9 @@ class GitHubLogin(APIView):
         token_headers = {'Accept': 'application/json'}
         token_res = requests.post('https://github.com/login/oauth/access_token', params=token_params, headers=token_headers)
         token_data = token_res.json()
+        print("--- GitHub Token Response ---")
+        print(token_data)
+        print("-----------------------------")
         access_token = token_data.get('access_token')
 
         if not access_token:
