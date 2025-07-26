@@ -23,6 +23,7 @@ class GitHubLogin(APIView):
         print("--- GitHub Token Response ---")
         print(token_data)
         print("-----------------------------")
+        print("i dont know shit anymore....")
         access_token = token_data.get('access_token')
 
         if not access_token:
