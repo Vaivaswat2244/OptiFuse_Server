@@ -1,13 +1,14 @@
 # Will contain no_fusion, singleton, min_w_cut, greedy_tp, costless_csp
 
 from ..core import *
-from metrics import calculate_metrics
+from .metrics import calculate_metrics
 import time
 import itertools
 from dataclasses import dataclass
 from collections import defaultdict
 import heapq
 from typing import Tuple
+from ..core.structures import Application, LambdaFunction
 
 def no_fusion(app: Application) -> dict:
     start_time = time.time()

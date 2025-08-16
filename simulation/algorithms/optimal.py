@@ -1,9 +1,9 @@
 # Will contain mtx_ilp
 import pulp
-from ..core import Application
+from ..core.structures import Application
 import time
 from collections import defaultdict
-from metrics import calculate_metrics
+from .metrics import calculate_metrics
 
 def mtx_ilp(app: Application) -> dict:
         start_time = time.time()

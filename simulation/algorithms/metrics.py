@@ -1,4 +1,4 @@
-from ..core import LambdaFunction, CompositeFunction, Application
+from ..core.structures import LambdaFunction, CompositeFunction, Application
 from ..utils.group_map import _get_func_to_group_map
 from typing import Any
 
