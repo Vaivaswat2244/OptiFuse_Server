@@ -72,3 +72,26 @@ class CompositeFunction:
         """
         gb_seconds = (self.memory / 1024) * (self.runtime / 1000)
         return 0.00001667 * gb_seconds
+
+@dataclass
+class Application:
+    """Encapsulates a serverless application's structure and constraints."""
+    name: str
+    functions: list[LambdaFunction]
+    critical_path_ids: list[str]
+    max_memory: int
+    max_latency: int
+    network_hop_delay: int = 10
+
+    @property
+    def functions_map(self) -> dict[str, LambdaFunction]:
+        return {f.id: f for f in self.functions}
+
+    @property
+    def root_function(self) -> LambdaFunction:
+        return next(f for f in self.functions if f.parent is None)
+
+    @property
+    def critical_path_functions(self) -> list[LambdaFunction]:
+        func_map = self.functions_map
+        return [func_map[fid] for fid in self.critical_path_ids if fid in func_map]
