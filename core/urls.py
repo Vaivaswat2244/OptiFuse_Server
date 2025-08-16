@@ -1,6 +1,6 @@
 # optifuse/server/core/urls.py
 from django.urls import path
-from .views import GitHubLogin, RepositoryListView, RepositoryFileView
+from .views import GitHubLogin, RepositoryListView, RepositoryFileView, ProfileSettingsView
 
 urlpatterns = [
     path('auth/github/', GitHubLogin.as_view(), name='github_login'),
@@ -10,4 +10,5 @@ urlpatterns = [
         RepositoryFileView.as_view(),
         name='repository_file_view'
     ),
+    path('profile/settings/', ProfileSettingsView.as_view(), name='profile_settings'),
 ]
