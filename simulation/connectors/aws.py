@@ -35,20 +35,56 @@ def fetch_live_xray_data(aws_session, time_window_hours: int = 24) -> dict:
     trace_summaries = xray_client.get_trace_summaries(
         StartTime=start_time,
         EndTime=end_time,
-        FilterExpression='service.type = "AWS::Lambda"'
+        
     )
+    print("--- logs begin  of trace summaries---")    
+    print(trace_summaries)
 
     function_metrics = {}
-    for summary in trace_summaries.get('TraceSummaries', []):
-        if summary.get('ResourceARNs'):
-            function_arn = summary['ResourceARNs'][0]['ARN']
-            function_name = function_arn.split(':')[-1]
+
+    paginator = xray_client.get_paginator('get_trace_summaries')
+    page_iterator = paginator.paginate(
+        StartTime=start_time,
+        EndTime=end_time,
+        
+    )
+    print("--- logs begin of page_iterator---")
+    print(page_iterator)
+
+    for page in page_iterator:
+        print(f"--- Found a page with {len(page.get('TraceSummaries', []))} summaries ---")
+        for summary in page.get('TraceSummaries', []):
+            # The filter ensures that the Annotations dictionary and the specific key will be present.
+            # We add checks for safety anyway.
+            annotations = summary.get('Annotations', {})
+            if 'aws.lambda.function_name' in annotations:
+                
+                # The function name is an array of strings in the annotations
+                # We take the first one as it represents the entry point of the trace.
+                function_name = annotations['aws.lambda.function_name'][0]
+                
+                # Initialize the dictionary for this function if it's the first time we see it
+                if function_name not in function_metrics:
+                    function_metrics[function_name] = {
+                        'total_duration': 0.0,
+                        'invocations': 0
+                    }
+                
+                # Add the duration of this trace to the function's total
+                function_metrics[function_name]['total_duration'] += summary.get('Duration', 0.0)
+                # Increment the invocation count
+                function_metrics[function_name]['invocations'] += 1
+
+    # for summary in trace_summaries.get('TraceSummaries', []):
+    #     if summary.get('ResourceARNs'):
+    #         function_arn = summary['ResourceARNs'][0]['ARN']
+    #         function_name = function_arn.split(':')[-1]
             
-            if function_name not in function_metrics:
-                function_metrics[function_name] = {'total_duration': 0, 'invocations': 0}
+    #         if function_name not in function_metrics:
+    #             function_metrics[function_name] = {'total_duration': 0, 'invocations': 0}
             
-            function_metrics[function_name]['total_duration'] += summary.get('Duration', 0)
-            function_metrics[function_name]['invocations'] += 1
+    #         function_metrics[function_name]['total_duration'] += summary.get('Duration', 0)
+    #         function_metrics[function_name]['invocations'] += 1
 
     processed_spec = {}
     for name, metrics in function_metrics.items():
