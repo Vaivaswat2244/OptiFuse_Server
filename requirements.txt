@@ -10,8 +10,10 @@ Django==5.2.4
 django-cors-headers==4.7.0
 djangorestframework==3.16.0
 docutils==0.19
+gunicorn==23.0.0
 idna==3.10
 jmespath==1.0.1
+packaging==25.0
 psycopg2-binary==2.9.10
 PuLP==3.2.2
 pyasn1==0.6.1
@@ -24,3 +26,4 @@ s3transfer==0.13.1
 six==1.17.0
 sqlparse==0.5.3
 urllib3==2.5.0
+whitenoise==6.9.0

@@ -1,4 +1,6 @@
 import boto3
+import time
+from typing import Dict, Any, List
 from datetime import datetime, timedelta, timezone
 
 def get_assumed_role_session(user_role_arn: str, external_id: str):
@@ -21,77 +23,107 @@ def get_assumed_role_session(user_role_arn: str, external_id: str):
         aws_session_token=credentials['SessionToken'],
     )
 
-def fetch_live_xray_data(aws_session, time_window_hours: int = 24) -> dict:
+def fetch_live_xray_data(aws_session, service_name: str, stage: str, function_ids: List[str]) -> Dict[str, Any]:
     """
-    Fetches and processes X-Ray trace data for a given time window.
-    Returns a simplified dictionary of function names to their average runtime.
+    Fetches live performance data using CloudWatch Logs Insights.
+    This version includes extensive logging and more robust error handling.
     """
-    xray_client = aws_session.client('xray')
+    logs_client = aws_session.client('logs')
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(hours=time_window_hours)
+    start_time = end_time - timedelta(hours=24)
+    
+    # Construct the full log group names
+    log_group_names = [f"/aws/lambda/{service_name}-{stage}-{name}" for name in function_ids]
 
-    # This is a simplified placeholder for the complex task of trace analysis.
-    # In a real app, you would paginate and process full traces.
-    trace_summaries = xray_client.get_trace_summaries(
-        StartTime=start_time,
-        EndTime=end_time,
-        
-    )
-    print("--- logs begin  of trace summaries---")    
-    print(trace_summaries)
+    if not log_group_names:
+        print("LOG: No function names provided, cannot query CloudWatch.")
+        return {}
 
-    function_metrics = {}
+    print(f"LOG: Attempting to query {len(log_group_names)} log groups: {log_group_names}")
 
-    paginator = xray_client.get_paginator('get_trace_summaries')
-    page_iterator = paginator.paginate(
-        StartTime=start_time,
-        EndTime=end_time,
-        
-    )
-    print("--- logs begin of page_iterator---")
-    print(page_iterator)
+    query = """
+    filter @type = "REPORT"
+    | stats avg(@duration) as avgDurationMS, 
+            avg(@maxMemoryUsed) / 1024 / 1024 as avgMemoryMB,
+            count(*) as invocations
+    by @log as logGroupName 
+    """
 
-    for page in page_iterator:
-        print(f"--- Found a page with {len(page.get('TraceSummaries', []))} summaries ---")
-        for summary in page.get('TraceSummaries', []):
-            # The filter ensures that the Annotations dictionary and the specific key will be present.
-            # We add checks for safety anyway.
-            annotations = summary.get('Annotations', {})
-            if 'aws.lambda.function_name' in annotations:
-                
-                # The function name is an array of strings in the annotations
-                # We take the first one as it represents the entry point of the trace.
-                function_name = annotations['aws.lambda.function_name'][0]
-                
-                # Initialize the dictionary for this function if it's the first time we see it
-                if function_name not in function_metrics:
-                    function_metrics[function_name] = {
-                        'total_duration': 0.0,
-                        'invocations': 0
-                    }
-                
-                # Add the duration of this trace to the function's total
-                function_metrics[function_name]['total_duration'] += summary.get('Duration', 0.0)
-                # Increment the invocation count
-                function_metrics[function_name]['invocations'] += 1
+    try:
+        start_query_response = logs_client.start_query(
+            logGroupNames=log_group_names,
+            startTime=int(start_time.timestamp()),
+            endTime=int(end_time.timestamp()),
+            queryString=query,
+            limit=10000
+        )
+        query_id = start_query_response['queryId']
+        print(f"LOG: CloudWatch query started with ID: {query_id}")
+    except logs_client.exceptions.ResourceNotFoundException as e:
+        print(f"ERROR: One or more log groups not found. Aborting. Details: {e}")
+        return {} # Gracefully exit if no logs exist
+    except Exception as e:
+        print(f"ERROR: Failed to start CloudWatch query. Details: {e}")
+        raise # Re-raise the exception to be caught by the view
 
-    # for summary in trace_summaries.get('TraceSummaries', []):
-    #     if summary.get('ResourceARNs'):
-    #         function_arn = summary['ResourceARNs'][0]['ARN']
-    #         function_name = function_arn.split(':')[-1]
-            
-    #         if function_name not in function_metrics:
-    #             function_metrics[function_name] = {'total_duration': 0, 'invocations': 0}
-            
-    #         function_metrics[function_name]['total_duration'] += summary.get('Duration', 0)
-    #         function_metrics[function_name]['invocations'] += 1
+    # Poll for the query to complete
+    response = None
+    max_wait_seconds = 60
+    wait_time = 0
+    while wait_time < max_wait_seconds:
+        print(f"LOG: Checking query status... (Attempt {wait_time + 1})")
+        response = logs_client.get_query_results(queryId=query_id)
+        if response['status'] in ['Complete', 'Failed', 'Cancelled']:
+            print(f"LOG: Query finished with status: {response['status']}")
+            break
+        time.sleep(1)
+        wait_time += 1
+    
+    # --- ADDED DEFENSIVE CHECKS ---
+    if not response:
+        print("ERROR: Query response was None after waiting.")
+        return {}
 
+    if response['status'] != 'Complete':
+        print(f"ERROR: CloudWatch query did not complete successfully. Final status: {response['status']}")
+        return {}
+
+    print(f"LOG: Query complete. Found {len(response.get('results', []))} result rows.")
+
+    # Process the results
     processed_spec = {}
-    for name, metrics in function_metrics.items():
-        if metrics['invocations'] > 0:
-            avg_duration_ms = (metrics['total_duration'] / metrics['invocations']) * 1000
-            processed_spec[name] = {
-                'avg_runtime_ms': round(avg_duration_ms),
-                'avg_memory_mb': 256, 
-            }
+    
+    # This is the line that was likely failing. We now protect it.
+    query_results = response.get('results', [])
+    if not query_results:
+        print("LOG: Query was successful but returned no result rows.")
+        return {}
+
+    for result in query_results:
+        log_stream_field = next((field['value'] for field in result if field['field'] == 'logStreamName'), None)
+        if not log_stream_field:
+            continue
+            
+        matched_function_id = None
+        for func_id in function_ids:
+            if f"-{func_id}" in log_stream_field:
+                matched_function_id = func_id
+                break
+        
+        if matched_function_id:
+            try:
+                avg_duration = float(next(field['value'] for field in result if field['field'] == 'avgDurationMS'))
+                avg_memory = float(next(field['value'] for field in result if field['field'] == 'avgMemoryMB'))
+
+                processed_spec[matched_function_id] = {
+                    'avg_runtime_ms': round(avg_duration),
+                    'avg_memory_mb': round(avg_memory),
+                }
+            except (StopIteration, TypeError, ValueError) as e:
+                print(f"WARNING: Could not parse result row. Skipping. Row: {result}, Error: {e}")
+
+    print("--- Processed Live Metrics from CloudWatch ---")
+    print(processed_spec)
+    print("---------------------------------------------")
+            
     return processed_spec

@@ -1,15 +1,16 @@
 import requests
 import base64
+import yaml
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from botocore.exceptions import ClientError
 
-from core.models import Profile  
+from core.models import Profile
 from .core.builder import ApplicationBuilder
 from .connectors.aws import get_assumed_role_session, fetch_live_xray_data
-from .runner import run_all_simulations 
-
+from .runner import run_all_simulations
 
 def fetch_github_file(github_token: str, owner: str, repo: str, file_path: str) -> str:
     """
@@ -23,7 +24,7 @@ def fetch_github_file(github_token: str, owner: str, repo: str, file_path: str) 
     }
     
     res = requests.get(api_url, headers=headers)
-    res.raise_for_status()  # This will raise an HTTPError for 4xx/5xx responses
+    res.raise_for_status() # Raises HTTPError for 4xx/5xx responses
     
     file_data = res.json()
     base64_content = file_data.get('content')
@@ -31,51 +32,38 @@ def fetch_github_file(github_token: str, owner: str, repo: str, file_path: str) 
         raise ValueError("File content from GitHub is empty.")
 
     try:
-        # Robust decoding
         cleaned_content = base64_content.strip()
         padding = len(cleaned_content) % 4
         if padding > 0:
             cleaned_content += "=" * (4 - padding)
         return base64.b64decode(cleaned_content).decode('utf-8')
-    except (base64.binascii.Error, UnicodeDecodeError) as e:
+    except Exception as e:
         raise ValueError(f"Failed to decode file content: {e}")
-
-
-# --- The Main API View ---
 
 class LiveSimulationView(APIView):
     """
-    An API endpoint to run a "live" optimization simulation. It fetches the
-    application structure from a serverless.yml file in GitHub, enriches it
-    with live performance data from AWS X-Ray, runs a suite of fusion
-    algorithms, and returns the optimization results.
+    Orchestrates the live optimization workflow using the CloudWatch-First strategy.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        # 1. Get request parameters and user profile
         repo_owner = request.data.get('owner')
         repo_name = request.data.get('repoName')
         
         if not repo_owner or not repo_name:
-            return Response(
-                {'error': 'owner and repoName are required in the request body.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'owner and repoName are required.'}, status=status.HTTP_400_BAD_REQUEST)
             
         try:
             profile = request.user.profile
         except Profile.DoesNotExist:
             return Response({'error': 'User profile not found.'}, status=status.HTTP_404_NOT_FOUND)
 
-        # 2. Check for necessary configurations
-        if not profile.github_access_token:
-            return Response({'error': 'GitHub token is not configured for this user.'}, status=status.HTTP_400_BAD_REQUEST)
-        if not profile.aws_role_arn:
-            return Response({'error': 'AWS Role ARN is not configured for this user.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not profile.github_access_token or not profile.aws_role_arn:
+            return Response({'error': 'GitHub token and AWS Role ARN must be configured.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # 3. Fetch the serverless.yml from GitHub
+            # Step 1: Fetch the serverless.yml from GitHub
+            print("Step 1/7: Fetching serverless.yml from GitHub...")
             yaml_content = fetch_github_file(
                 github_token=profile.github_access_token,
                 owner=repo_owner,
@@ -83,35 +71,52 @@ class LiveSimulationView(APIView):
                 file_path='serverless.yml'
             )
             
-            # 4. Build the base application model from the YAML file
+            # Step 2: Build the base application model from the YAML file
+            print("Step 2/7: Parsing YAML and building base application model...")
             base_application = ApplicationBuilder.create_from_yaml_content(repo_name, yaml_content)
 
-            # 5. Assume the user's AWS role
+            # Step 3: Extract function names needed for the CloudWatch query
+            print("Step 3/7: Extracting function names for AWS query...")
+            function_ids = [func.id for func in base_application.functions]
+            
+            # --- NEW STEP: Extract service and stage from YAML ---
+            print("Step 4/7: Extracting service and stage from YAML...")
+            try:
+                yml_spec = yaml.safe_load(yaml_content)
+                service_name = yml_spec.get('service', 'unknown-service')
+                stage = yml_spec.get('provider', {}).get('stage', 'dev')
+            except (yaml.YAMLError, AttributeError):
+                raise ValueError("Could not parse service name or stage from serverless.yml.")
+            # --- END OF NEW STEP ---
+
+            # Step 5: Assume the user's AWS role
+            print("Step 5/7: Assuming user's AWS IAM Role...")
             aws_session = get_assumed_role_session(
                 user_role_arn=profile.aws_role_arn,
                 external_id=str(profile.aws_external_id)
             )
 
-            # 6. Fetch live performance data from AWS
-            live_metrics = fetch_live_xray_data(aws_session)
+            # Step 6: Fetch live performance data from AWS
+            print("Step 6/7: Fetching live performance data from CloudWatch Logs...")
+            live_metrics = fetch_live_xray_data(aws_session, service_name, stage, function_ids)
             
-            # 7. Enrich the application model with the live data
+            # Step 7: Enrich the application model with the live data
+            print("Step 7/7: Enriching application model with live data...")
             live_application = ApplicationBuilder.enrich_with_live_data(base_application, live_metrics)
 
-            # 8. Run all simulation algorithms on the final, enriched model
+            # Run the final simulation
+            print("Running simulations...")
             results = run_all_simulations(live_application)
 
-            # 9. Clean results for JSON serialization before returning
-            # (LambdaFunction objects cannot be directly converted to JSON)
+            # Clean results for JSON serialization
             for result in results:
-                if 'groups' in result and result['groups']:
+                if 'groups' in result and result.get('groups'):
                     result['groups'] = [[func.id for func in group] for group in result['groups']]
 
             return Response(results, status=status.HTTP_200_OK)
 
         except requests.exceptions.HTTPError as e:
-            # Handle errors from the GitHub API call
-            status_code = e.response.status_code
+            status_code = e.response.status_code if e.response is not None else 500
             if status_code == 404:
                 error_message = "serverless.yml not found in the specified repository."
             else:
@@ -119,11 +124,23 @@ class LiveSimulationView(APIView):
             return Response({'error': error_message, 'details': e.response.text}, status=status_code)
         
         except ValueError as e:
-            # Handle errors from our own logic (e.g., bad YAML, decoding errors)
+            # Catches errors from our builder/parser logic
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        
+        except ClientError as e:
+            # Catches specific AWS/boto3 errors
+            error_response = e.response
+            error_code = error_response.get('Error', {}).get('Code', 'Unknown')
+            error_message = error_response.get('Error', {}).get('Message', 'No details from AWS.')
+            return Response({
+                'error': 'An error occurred while communicating with AWS.',
+                'details': f"{error_code}: {error_message}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
-        except Exception as e: 
+        except Exception as e:
+            # A final catch-all for any other unexpected errors
+            print(f"UNEXPECTED ERROR: {e}") # Log the full error for debugging
             return Response(
-                {'error': 'An unexpected error occurred during the live analysis.', 'details': str(e)},
+                {'error': 'An unexpected internal server error occurred.', 'details': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
